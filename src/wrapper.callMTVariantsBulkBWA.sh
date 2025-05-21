@@ -9,7 +9,7 @@
 # caller: NSF
 # dependency: callMTVariantsBulkBWA.sh
 # upstream: bwa
-# downstream: NSF
+# downstream: <R>readAFStandard
 
 set -e
 

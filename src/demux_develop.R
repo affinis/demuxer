@@ -504,21 +504,23 @@ plotImputedBackbone(sc_merged.bb)
 sc_merged.bb<-clusterByConsensusSeq(sc_merged.bb,n.cluster = 2)
 
 #try demux 4 peopple 10x big array
-sc_merged0<-readAFFileWithFiltering('~/analysis/cellranger/X5_250409MIX01/outs/per_sample_outs/X5_250409MIX01/count/',sc.mode = T)
+sc_merged0<-readAFFileWithFiltering('/tmpdata/LyuLin/analysis/circadian/cellranger/X5_250409MIX01/outs/per_sample_outs/X5_250409MIX01/count',sc.mode = T)
 sc_merged<-sc_merged0
+bcr_cells<-read.table('/tmpdata/LyuLin/analysis/circadian/cellranger/X5_250409MIX01/outs/per_sample_outs/X5_250409MIX01/vdj_b/filtered_contig_annotations.csv',sep = ',',header = T)
+unique(bcr_cells$barcode)
 
-sc_merged$maf.ratio<-pmax(sc_merged$af,sc_merged$baf)/sc_merged$n.read
-min.maf.ratio<-sc_merged[sc_merged$n.read>20,] %>% group_by(cell_id) %>% summarise(min.maf.ratio=min(maf.ratio))
-doublet.like<-min.maf.ratio[min.maf.ratio$min.maf.ratio<0.8,"cell_id"] %>% unlist %>% as.vector()
-sc_merged<-sc_merged[!(sc_merged$cell_id %in%doublet.like),]
+std<-readAFStandard('/tmpdata/LyuLin/analysis/circadian/RNASeq')
+sc_merged<-filterInformativePositionsBySTD(sc_merged,std[c(1,2,3,4,6)])
 
 sc_merged<-filterDoublet(sc_merged)
 sc_merged<-callExactBase(sc_merged)
-sc_merged<-filterInformativePositionsByCell(sc_merged,min.cell = 1000)
+demux_out<-demuxBySTD(sc_merged,std)
+#sc_merged<-filterInformativePositionsByCell(sc_merged,min.cell = 1000)
 plotImputedBackbone(sc_merged)
-sc_merged.bb<-constructBackboneMulti(sc_merged,gather.result = T)
-plotImputedBackbone(sc_merged.bb)
-sc_merged.bb<-clusterByConsensusSeq(sc_merged.bb,n.cluster = 4)
+#sc_merged.bb<-constructBackboneMulti(sc_merged,gather.result = T)
+#plotImputedBackbone(sc_merged.bb)
+#sc_merged.bb<-clusterByConsensusSeq(sc_merged.bb,n.cluster = 4)
+sc_merged<-clusterByConsensusSeq(sc_merged,n.cluster = 4)
 (sc_merged.bb[c("cell_id","cluster")] %>% unique)$cluster %>% table()
 saveRDS(sc_merged.bb,'analysis/cellranger/X5_250409MIX01/outs/per_sample_outs/X5_250409MIX01/count/demux.rds')
 sc_merged.bb<-readRDS('analysis/cellranger/X5_250409MIX01/outs/per_sample_outs/X5_250409MIX01/count/demux.rds')

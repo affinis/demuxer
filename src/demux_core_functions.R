@@ -56,7 +56,7 @@ position_with_polymorphism_strict<-c(297,300,560,1397,1533,1534,1670,2285,2442,2
 # sep: separator
 # field: wanted field
 ##
-# caller: readAFFileWithFiltering
+# caller: readAFStandard
 # depandency: NSF
 # upstream: NSF
 # downstream: NSF
@@ -71,12 +71,13 @@ getField<-function(vec,sep,field){
 # Function: clusterByConsensusSeq
 # imputed.backbone: SNP table processed wtih 'constructBackbone' or 'constructBackboneMulti'
 # n.cluster: number of samples in the multiplexed sample
-# speed: for a typical demultiplexed sample with 60000-70000 cells, ~2h is needed
 ##
 # caller: NSF
 # dependency: NSF
 # upstream: constructBackbone, constructBackboneMulti
 # downstream: NSF
+##
+# speed: for a typical multiplexed sample with 60000-70000 cells, ~2h is needed
 clusterByConsensusSeq<-function(imputed.backbone,n.cluster){
   imputed.backbone.bkp=imputed.backbone
   imputed.backbone=imputed.backbone[c("cell_id","pos","base")]%>% spread(.,key=pos,value=base)
@@ -104,17 +105,18 @@ clusterByConsensusSeq<-function(imputed.backbone,n.cluster){
 # strict.mask: logical, if TRUE, use 'position_with_polymorphism_strict', else use 'position_with_polymorphism'
 ##
 # caller: NSF
-# dependency: getField
+# dependency: NSF
 # downstream: filterDoublet
-# upstream: NSF
-
-readAFFileWithFiltering<-function(af.file.path,pos.list=NULL,logR.threshould=NULL,sc.mode=F,min.n.read=5,coding.only=F,mask.poly=T,strict.mask=T){
+# upstream: <bash>callMTVariantsCellLevelForCellrangerMulti.sh
+##
+# speed: about 10-20 min for a dataset of 60000-70000 cells
+readAFFileWithFiltering<-function(af.file.path,pos.list=NULL,sc.mode=F,min.n.read=5,coding.only=F,mask.poly=T,strict.mask=T){
+  start_time=Sys.time()
   if(sc.mode){
     af.file="allele.freq.cell.tsv"
   }else{
     af.file="allele.freq.tsv"
   }
-
   af.raw=NULL
   if(str_ends(af.file,"/")){
     af.raw=read.delim(paste0(af.file.path,af.file),header=F)
@@ -138,19 +140,21 @@ readAFFileWithFiltering<-function(af.file.path,pos.list=NULL,logR.threshould=NUL
   }else{
     af.mod=dplyr::filter(af.raw,nchar(af.raw$ref)==1&nchar(af.raw$alt)==1)
   }
-  #remove(af.raw)
+  remove(af.raw)
+  af.mod$af=as.numeric(af.mod$af)
+  af.mod$baf=as.numeric(af.mod$baf)
   #af.mod$af=getField(af.mod$freqs,",",1) %>% as.numeric()
   #gc()
   #af.mod$baf=getField(af.mod$freqs,",",2) %>% as.numeric()
   #gc()
   af.mod[is.na(af.mod$baf),"baf"]=0
-  af.mod$logR=log2(af.mod$baf/af.mod$af)
+  #af.mod$logR=log2(af.mod$baf/af.mod$af)
   if(!sc.mode){
     af.mod=dplyr::filter(af.mod,af!=0)
   }
-  if(!is.null(logR.threshould)){
-    af.mod=dplyr::filter(af.mod,abs(logR)>=logR.threshould)
-  }
+  #if(!is.null(logR.threshould)){
+  #  af.mod=dplyr::filter(af.mod,abs(logR)>=logR.threshould)
+  #}
   af.mod$n.read=af.mod$af+af.mod$baf
   af.mod=dplyr::filter(af.mod,n.read>=min.n.read)
   if(coding.only){
@@ -165,16 +169,20 @@ readAFFileWithFiltering<-function(af.file.path,pos.list=NULL,logR.threshould=NUL
 
   }
   print(head(af.mod))
+  end_time=Sys.time()
+  message(paste0("start time: ",start_time,", end_time:",end_time))
   return(af.mod)
 }
 
 # Function: readAFStandard
 # read bulkRNASeq af file
+# af.file.path: a folder path containing several sample folder, each folder contains allele.freq.tsv under it
+# pos.list: a vector containing positions to include, setting NULL to include all positions  
 ##
 # caller: NSF
-# dependency: NSF
-# downstream: 
-# upstream: 
+# dependency: getField
+# downstream: filterInformativePositionsBySTD, demuxBySTD, calculateDistBetweenSampleAndStandard, calculateDistBetweenStandard
+# upstream: <bash>callMTVariantsBulkBWA.sh, <bash>wrapper.callMTVariantsBulkBWA.sh
 readAFStandard<-function(af.file.path,pos.list=NULL){
   af.res=NULL
   for(sample in list.files(af.file.path)){
@@ -184,6 +192,8 @@ readAFStandard<-function(af.file.path,pos.list=NULL){
     af.mod=NULL
     if(!is.null(pos.list)){
       af.mod=dplyr::filter(af.this,pos %in% pos.list)
+    }else{
+      af.mod=af.this
     }
     af.mod=dplyr::filter(af.mod,nchar(af.mod$ref)==1&nchar(af.mod$alt)==1)
     remove(af.this)
@@ -202,12 +212,13 @@ readAFStandard<-function(af.file.path,pos.list=NULL){
 
 # Function: callConsensusSeq
 # determine the sequence of each demuxed sample
+# clustered.backbone: output of clusterByConsensusSeq
 # !! notice !!, a previous function also called 'callConsensusSeq' but replaced by 'callExactBase',
 # pay attention to previous code that used 'callConsensusSeq'
 ##
 # caller: NSF
 # dependency: NSF
-# downstream: NSF
+# downstream: calculateDistBetweenSampleAndStandard
 # upstream: clusterByConsensusSeq
 callConsensusSeq<-function(clustered.backbone){
   clustered.backbone=clustered.backbone %>% group_by(pos,base,cluster) %>% summarise(count=n())
@@ -228,14 +239,14 @@ callConsensusSeq<-function(clustered.backbone){
 
 
 # Function: clusterLogRByNumSample
-# !!deprecated function!!
+# <<deprecated function>
 # logR.table: af table with column logR
 # n.sample: cluster of logR values
 ##
-# caller:
-# dependency: 
-# downstream: 
-# upstream: 
+# caller: NSF
+# dependency: NSF
+# downstream: plotLogRCluster
+# upstream: readAFFileWithFiltering<no longer support>
 clusterLogRByNumSample<-function(logR.table,n.sample){
   n.peak=NULL
   if(n.sample<=3){
@@ -249,13 +260,13 @@ clusterLogRByNumSample<-function(logR.table,n.sample){
 }
 
 # Function: plotLogRCluster
-# !!deprecated function!!
+# <<deprecated function>>
 # logR.table: af table with column logR, should be processed with 'clusterLogRByNumSample' to add column 'cluster'
 ##
-# caller:
-# dependency: 
-# downstream: 
-# upstream: 
+# caller: NSF
+# dependency: NSF
+# downstream: NSF
+# upstream: clusterLogRByNumSample
 plotLogRCluster<-function(logR.table){
   pointplot=ggplot(logR.table)+geom_point(aes(x=pos,y=logR,color=cluster))+
     geom_hline(yintercept = 0,linetype=2)+
@@ -271,7 +282,7 @@ plotLogRCluster<-function(logR.table){
 ##
 # caller: NSF
 # dependency: NSF
-# downstream: filterInformativePositionsByCell, 
+# downstream: filterInformativePositionsByCell, filterInformativePositionsBySTD 
 # upstream: filterDoublet
 callExactBase<-function(af){
   af$base=ifelse(af$af>af$baf,af$ref,af$alt)
@@ -483,8 +494,8 @@ impute_snp_by_position <- function(snp_matrix, position_transition_matrices,tran
 # dependency: NSF
 # downstream: plotImputedBackbone, constructBackboneMulti
 # upstream: callExactBase
-filterInformativePositionsByCell<-function(mixed.sc.snp.backbone,min.cell=100){
-  summarised_table=mixed.sc.snp.backbone %>% group_by(pos,base) %>% summarise(n.max=n())
+filterInformativePositionsByCell<-function(df,min.cell=100){
+  summarised_table=df %>% group_by(pos,base) %>% summarise(n.max=n())
   divergent.pos=summarised_table$pos[summarised_table$pos %>% duplicated()]
   summarised_table=summarised_table[summarised_table$pos %in% divergent.pos,] %>% 
     group_by(pos) %>% mutate(min.count=n.max[which.min(n.max)])
@@ -492,8 +503,66 @@ filterInformativePositionsByCell<-function(mixed.sc.snp.backbone,min.cell=100){
   
   summarised_table=dplyr::filter(summarised_table,min.count>=min.cell)
   I.pos=unique(summarised_table$pos)
-  res=dplyr::filter(mixed.sc.snp.backbone,pos %in% I.pos)
+  res=dplyr::filter(df,pos %in% I.pos)
   return(res)
+}
+
+# Function: filterInformativePositionsBySTD
+# df: output of callExactBase
+# std: outpt of readAFStandard
+##
+# caller: NSF
+# dependency: NSF
+# downstream: demuxBySTD
+# upstream: callExactBase, readAFStandard
+filterInformativePositionsBySTD<-function(df,std){
+  pos_diff=NULL
+  for (i in 1:nrow(std)) {
+    if((std[i,2:ncol(std)]%>% unlist() %>% unique()%>% length())>1){
+      pos_diff=c(pos_diff,std[i,"pos"])
+    }else{
+      next
+    }
+  }
+  df=dplyr::filter(df,pos %in% pos_diff)
+  return(df)
+}
+
+# Function: demuxBySTD
+# df: output of filterInformativePositionsBySTD
+# std: output of readAFStandard
+##
+# caller: NSF
+# dependency: NSF
+# upstream: callExactBase, readAFStandard
+# downstream: 
+demuxBySTD<-function(df,std,test.run.num=NULL){
+  positions=unique(df$pos)
+  std.filter=unique(dplyr::filter(std,pos %in% positions))
+  cells=unique(df$cell_id)
+  if(!is.null(test.run.num)){
+    cells=sample(cells,test.run.num)
+    df=dplyr::filter(df,cell_id %in% cells)
+  }
+  demux_res=NULL
+  for(cell in cells){
+    df.this=df[df$cell_id==cell,c("pos","base")]
+    cell.seq=paste(df.this$base,collapse = "")
+    #print(df.this)
+    std.this=std.filter[std.filter$pos %in% df.this$pos,]
+    std.seqs=std.this[2:ncol(std.this)] %>% apply(.,2,paste, collapse = "")
+    #print(std.this)
+    dists=adist(cell.seq,std.seqs)
+    individual=NULL
+    if(dists[which.min(dists)]==0&sum(dists==dists[which.min(dists)])==1){
+      individual=colnames(dists)[which.min(dists)]
+    }else{
+      individual="unknown"
+    }
+    names(individual)=cell
+    demux_res=c(demux_res,individual)
+  }
+  return(demux_res)
 }
 
 # Function: plotImputedBackbone
@@ -519,16 +588,28 @@ plotImputedBackbone<-function(imputed.table,n.sample=25,use.pos=NULL,seed=2025){
 }
 
 # Function: filterDoublet
+# af: output of callExactBase
 ##
 # caller: NSF
 # dependency: NSF
 # downstream: callExactBase
-# upstream: readAFFileWithFiltering
+# upstream: readAFFileWithFiltering, filterInformativePositionsBySTD
 filterDoublet<-function(af){
   af$maf.ratio=pmax(af$af,af$baf)/af$n.read
-  min.maf.ratio=af[af$n.read>20,] %>% group_by(cell_id) %>% summarise(min.maf.ratio=min(maf.ratio))
-  doublet.like=min.maf.ratio[min.maf.ratio$min.maf.ratio<0.8,"cell_id"] %>% unlist %>% as.vector()
-  af=af[!(af$cell_id %in%doublet.like),]
+  #min.maf.ratio=af[af$n.read>20,] %>% group_by(cell_id) %>% summarise(min.maf.ratio=min(maf.ratio))
+  #doublet.like=min.maf.ratio[min.maf.ratio$min.maf.ratio<0.8,"cell_id"] %>% unlist %>% as.vector()
+  #af=af[!(af$cell_id %in%doublet.like),]
+  af=af %>% group_by(cell_id) %>% mutate(doublet_score=-log2(prod(maf.ratio)))
+  
+  af$flag=ifelse(af$doublet_score>=1,"doublet","singlet")
+  flag.table=unique(af[,c("cell_id","doublet_score","flag")])
+  p=ggplot(flag.table)+geom_histogram(aes(x=doublet_score,fill=flag),binwidth = 0.1)+
+    xlim(c(0.5,20))
+  print(p)
+
+  num_doublet=length(unique(dplyr::filter(af,doublet_score>=1)$cell_id))
+  message(paste0(num_doublet," doublet filtered"))
+  af=dplyr::filter(af,doublet_score<1)
   return(af)
 }
 
@@ -536,12 +617,29 @@ filterDoublet<-function(af){
 # sample.seqs: col1 should be 'pos', then cols following col1 are samples
 # std.seqs: col1 should be 'pos', then cols following col1 are samples
 ##
-# caller
-# dependency
+# caller: NSF
+# dependency: NSF
 # upstream: readAFStandard, callConsensusSeq
-# downstream
+# downstream: 
+##
 calculateDistBetweenSampleAndStandard<-function(sample.seqs,std.seqs){
   test.seqs=sample.seqs[2:ncol(sample.seqs)] %>% apply(.,2,paste, collapse = "")
   std.seqs=std.seqs[2:ncol(std.seqs)] %>% apply(.,2,paste, collapse = "")
   return(adist(test.seqs,std.seqs))
 }
+
+# Function: calculateDistBetweenStandard
+# std.seqs: col1 should be 'pos', then cols following col1 are samples
+##
+# caller: NSF
+# dependency: NSF
+# upstream: readAFStandard
+# downstream: NSF
+calculateDistBetweenStandard<-function(std.seqs){
+  message("creating seq strings")
+  std.seqs=std.seqs[2:ncol(std.seqs)] %>% apply(.,2,paste, collapse = "")
+  message("calculating dists")
+  return(adist(std.seqs))
+}
+
+

@@ -3,10 +3,10 @@
 # input: *.bam (provided as $1), chrM.fasta
 # output: allele.freq.tsv
 
-# caller: NSF
+# caller: wrapper.callMTVariantsBulkBWA.sh 
 # denpendency: samtools (sudo apt install samtools), bcftools (sudo apt install bcftools)
 # upstream: bwa
-# downstream: NSF 
+# downstream: <R>readAFStandard
 
 set -e
 
