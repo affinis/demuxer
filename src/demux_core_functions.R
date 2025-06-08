@@ -24,9 +24,6 @@ library(tidyverse)
 library(parallel)
 library(ape)
 
-# workflow: readAFFileWithFiltering -> filterDoublet -> callExactBase -> filterInformativePositionsByCell -> 
-#           constructBackboneMulti -> clusterByConsensusSeq   
-
 MT_coding_region=c(3307:4262,
                   4470:5511,
                   5904:7445,
@@ -104,7 +101,7 @@ clusterByConsensusSeq<-function(imputed.backbone,n.cluster){
 # mask.poly: logical, indicating if positions with individual level polymorphism should be neglected, because these positions will cause ambiguity in demultiplexing. the positions is in experimental vectors called 'position_with_polymorphism' or 'position_with_polymorphism_strict' defined in this file.
 # strict.mask: logical, if TRUE, use 'position_with_polymorphism_strict', else use 'position_with_polymorphism'
 ##
-# caller: NSF
+# caller: demux
 # dependency: NSF
 # downstream: filterDoublet
 # upstream: <bash>callMTVariantsCellLevelForCellrangerMulti.sh
@@ -179,7 +176,7 @@ readAFFileWithFiltering<-function(af.file.path,pos.list=NULL,sc.mode=F,min.n.rea
 # af.file.path: a folder path containing several sample folder, each folder contains allele.freq.tsv under it
 # pos.list: a vector containing positions to include, setting NULL to include all positions  
 ##
-# caller: NSF
+# caller: demux
 # dependency: getField
 # downstream: filterInformativePositionsBySTD, demuxBySTD, calculateDistBetweenSampleAndStandard, calculateDistBetweenStandard
 # upstream: <bash>callMTVariantsBulkBWA.sh, <bash>wrapper.callMTVariantsBulkBWA.sh
@@ -280,7 +277,7 @@ plotLogRCluster<-function(logR.table){
 # Function: callExactBase
 # af: af table, if af table is called at single cell level with multiplexed data, be careful to remove doublet
 ##
-# caller: NSF
+# caller: demux
 # dependency: NSF
 # downstream: filterInformativePositionsByCell, filterInformativePositionsBySTD 
 # upstream: filterDoublet
@@ -511,7 +508,7 @@ filterInformativePositionsByCell<-function(df,min.cell=100){
 # df: output of callExactBase
 # std: outpt of readAFStandard
 ##
-# caller: NSF
+# caller: demux
 # dependency: NSF
 # downstream: demuxBySTD
 # upstream: callExactBase, readAFStandard
@@ -532,10 +529,12 @@ filterInformativePositionsBySTD<-function(df,std){
 # df: output of filterInformativePositionsBySTD
 # std: output of readAFStandard
 ##
-# caller: NSF
+# caller: demux
 # dependency: NSF
 # upstream: callExactBase, readAFStandard
-# downstream: 
+# downstream: <Seurat>AddMetaData
+##
+# speed: for a multiplexed sample with ~50000 cells, about 10 min
 demuxBySTD<-function(df,std,test.run.num=NULL){
   positions=unique(df$pos)
   std.filter=unique(dplyr::filter(std,pos %in% positions))
@@ -590,24 +589,24 @@ plotImputedBackbone<-function(imputed.table,n.sample=25,use.pos=NULL,seed=2025){
 # Function: filterDoublet
 # af: output of callExactBase
 ##
-# caller: NSF
+# caller: demux
 # dependency: NSF
 # downstream: callExactBase
 # upstream: readAFFileWithFiltering, filterInformativePositionsBySTD
-filterDoublet<-function(af){
+filterDoublet<-function(af,plt.db.score=c(0.5,20),threshould=1){
   af$maf.ratio=pmax(af$af,af$baf)/af$n.read
   #min.maf.ratio=af[af$n.read>20,] %>% group_by(cell_id) %>% summarise(min.maf.ratio=min(maf.ratio))
   #doublet.like=min.maf.ratio[min.maf.ratio$min.maf.ratio<0.8,"cell_id"] %>% unlist %>% as.vector()
   #af=af[!(af$cell_id %in%doublet.like),]
   af=af %>% group_by(cell_id) %>% mutate(doublet_score=-log2(prod(maf.ratio)))
   
-  af$flag=ifelse(af$doublet_score>=1,"doublet","singlet")
+  af$flag=ifelse(af$doublet_score>=threshould,"doublet","singlet")
   flag.table=unique(af[,c("cell_id","doublet_score","flag")])
   p=ggplot(flag.table)+geom_histogram(aes(x=doublet_score,fill=flag),binwidth = 0.1)+
-    xlim(c(0.5,20))
+    xlim(plt.db.score)
   print(p)
 
-  num_doublet=length(unique(dplyr::filter(af,doublet_score>=1)$cell_id))
+  num_doublet=length(unique(dplyr::filter(af,doublet_score>=threshould)$cell_id))
   message(paste0(num_doublet," doublet filtered"))
   af=dplyr::filter(af,doublet_score<1)
   return(af)
@@ -640,6 +639,32 @@ calculateDistBetweenStandard<-function(std.seqs){
   std.seqs=std.seqs[2:ncol(std.seqs)] %>% apply(.,2,paste, collapse = "")
   message("calculating dists")
   return(adist(std.seqs))
+}
+
+# Function: demux
+# integrated function for demultiplexing for production
+# sc.out: output folder of callMTVariantsCellLevelForCellrangerMulti.sh (by default, cellranger multi output folder under 'count')
+# blk.sample.path: output folder of wrapper.callMTVariantsBulkBWA.sh
+##
+# caller: NSF
+# dependency: readAFFileWithFiltering, readAFStandard, filterInformativePositionsBySTD, filterDoublet, callExactBase, demuxBySTD
+# upstream: <bash>callMTVariantsCellLevelForCellrangerMulti.sh, <bash>wrapper.callMTVariantsBulkBWA.sh
+# downstream: <Seurat>AddMetaData
+##
+# speed:
+demux<-function(sc.out,blk.sample.path){
+  message(Sys.time())
+  message("reading sc af file...")
+  sc_merged=readAFFileWithFiltering(sc.out,sc.mode = T)
+  message("std file...")
+  std=readAFStandard(blk.sample.path)
+  message("filtering informative positions...")
+  sc_merged=filterInformativePositionsBySTD(sc_merged,std[c(1,2,3,4,6)])
+  sc_merged=filterDoublet(sc_merged,threshould = 1)
+  sc_merged=callExactBase(sc_merged)
+  demux_out=demuxBySTD(sc_merged,std[c(1,2,3,4,6)])
+  message(Sys.time())
+  return(demux_out)
 }
 
 
