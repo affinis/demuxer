@@ -593,7 +593,7 @@ plotImputedBackbone<-function(imputed.table,n.sample=25,use.pos=NULL,seed=2025){
 # dependency: NSF
 # downstream: callExactBase
 # upstream: readAFFileWithFiltering, filterInformativePositionsBySTD
-filterDoublet<-function(af,plt.db.score=c(0.5,20),threshould=1){
+filterDoublet<-function(af,plt.db.score=c(0.5,20),threshould=1,keep.doublet=F){
   af$maf.ratio=pmax(af$af,af$baf)/af$n.read
   #min.maf.ratio=af[af$n.read>20,] %>% group_by(cell_id) %>% summarise(min.maf.ratio=min(maf.ratio))
   #doublet.like=min.maf.ratio[min.maf.ratio$min.maf.ratio<0.8,"cell_id"] %>% unlist %>% as.vector()
@@ -607,9 +607,14 @@ filterDoublet<-function(af,plt.db.score=c(0.5,20),threshould=1){
   print(p)
 
   num_doublet=length(unique(dplyr::filter(af,doublet_score>=threshould)$cell_id))
-  message(paste0(num_doublet," doublet filtered"))
-  af=dplyr::filter(af,doublet_score<1)
-  return(af)
+  message(paste0(num_doublet," doublet"))
+  #assign("runtime.filterDoublet.af",af,envir = .GlobalEnv)
+  if(keep.doublet){
+    return(af)
+  }else{
+    af=dplyr::filter(af,doublet_score<threshould)
+    return(af)
+  }
 }
 
 # Function: calculateDistBetweenSampleAndStandard
@@ -642,16 +647,16 @@ calculateDistBetweenStandard<-function(std.seqs){
 }
 
 # Function: demux
-# integrated function for demultiplexing for production
+# integrated function for demultiplexing
 # sc.out: output folder of callMTVariantsCellLevelForCellrangerMulti.sh (by default, cellranger multi output folder under 'count')
 # blk.sample.path: output folder of wrapper.callMTVariantsBulkBWA.sh
 ##
-# caller: NSF
+# caller: <Rscript>wrapper.demuxAllSamples.R
 # dependency: readAFFileWithFiltering, readAFStandard, filterInformativePositionsBySTD, filterDoublet, callExactBase, demuxBySTD
 # upstream: <bash>callMTVariantsCellLevelForCellrangerMulti.sh, <bash>wrapper.callMTVariantsBulkBWA.sh
 # downstream: <Seurat>AddMetaData
 ##
-# speed:
+# speed: ~40 min for multiplexed sample with 50000-60000 cells
 demux<-function(sc.out,blk.sample.path){
   message(Sys.time())
   message("reading sc af file...")
@@ -660,9 +665,18 @@ demux<-function(sc.out,blk.sample.path){
   std=readAFStandard(blk.sample.path)
   message("filtering informative positions...")
   sc_merged=filterInformativePositionsBySTD(sc_merged,std[c(1,2,3,4,6)])
-  sc_merged=filterDoublet(sc_merged,threshould = 1)
+  message("finding doublet...")
+  sc_merged=filterDoublet(sc_merged,threshould = 1,keep.doublet = T)
+  message("calling bases...")
   sc_merged=callExactBase(sc_merged)
+  message("demuxing...")
   demux_out=demuxBySTD(sc_merged,std[c(1,2,3,4,6)])
+  message("generating results...")
+  demux_out=demux_out %>% as.data.frame() %>% rownames_to_column("cell_id")
+  colnames(demux_out)[2]="individual"
+  demux_out=left_join(demux_out,unique(sc_merged[c("cell_id","doublet_score")]))
+  rownames(demux_out)=demux_out$cell_id
+  demux_out$cell_id=NULL
   message(Sys.time())
   return(demux_out)
 }
